@@ -39,7 +39,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # 用于创建 Release
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -47,18 +47,16 @@ jobs:
         with:
           submodules: 'recursive'
 
-      # 修补 esp-now 组件与 IDF 5.0 的兼容性问题
-      - name: Patch esp-now component for IDF 5.0
+      # 关键修补步骤：修复 esp-now 组件与 IDF 5.0 的不兼容
+      - name: Patch esp-now for IDF 5.0
         run: |
-          ESP_NOW_MEM_C="managed_components/espressif__esp-now/src/utils/src/espnow_mem.c"
-          if [ -f "$ESP_NOW_MEM_C" ]; then
-            # 替换未知类型 configRUN_TIME_COUNTER_TYPE 为 uint32_t
-            sed -i 's/configRUN_TIME_COUNTER_TYPE/uint32_t/g' "$ESP_NOW_MEM_C"
-            # 修正 uxTaskGetSystemState 参数类型（将 &ulTotalRunTime 强制转换）
-            # 更干净的方法：将 ulTotalRunTime 声明为 uint32_t，但上面已经改了类型声明，无需额外操作
-            echo "Patched $ESP_NOW_MEM_C for IDF 5.0 compatibility"
+          TARGET_FILE="managed_components/espressif__esp-now/src/utils/src/espnow_mem.c"
+          if [ -f "$TARGET_FILE" ]; then
+            # 将未知类型 configRUN_TIME_COUNTER_TYPE 替换为 uint32_t
+            sed -i 's/configRUN_TIME_COUNTER_TYPE/uint32_t/g' "$TARGET_FILE"
+            echo "✅ Patched $TARGET_FILE"
           else
-            echo "Warning: $ESP_NOW_MEM_C not found, skip patching"
+            echo "⚠️ $TARGET_FILE not found, skipping patch"
           fi
 
       - name: Build with ESP-IDF
@@ -68,7 +66,7 @@ jobs:
           target: ${{ inputs.board }}
           path: .
           command: |
-            # 如果用户提供了自定义引脚配置，则写入 sdkconfig 并重新配置
+            # 应用自定义引脚配置
             if [ -n "${{ inputs.pin_config }}" ]; then
               echo "${{ inputs.pin_config }}" >> sdkconfig
               idf.py reconfigure
@@ -85,23 +83,21 @@ jobs:
           fi
           ARTIFACT_NAME="esp-drone-firmware-${BOARD}-${TAG}"
           mkdir -p artifacts
-          # 复制所有常见的固件文件
           cp build/*.bin artifacts/ 2>/dev/null || true
           cp build/bootloader/*.bin artifacts/ 2>/dev/null || true
           cp build/partition_table/*.bin artifacts/ 2>/dev/null || true
-          # 生成 ZIP 包
           zip -j ${ARTIFACT_NAME}.zip artifacts/*.bin
           echo "artifact_path=${ARTIFACT_NAME}.zip" >> $GITHUB_OUTPUT
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
 
-      - name: Upload artifact to workflow run (debug)
+      - name: Upload artifact to workflow run
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.prepare.outputs.tag }}_${{ inputs.board }}.zip
           path: ${{ steps.prepare.outputs.artifact_path }}
           if-no-files-found: error
 
-      - name: Create GitHub Release and upload
+      - name: Create GitHub Release
         if: inputs.create_release == true
         uses: softprops/action-gh-release@v1
         with:
