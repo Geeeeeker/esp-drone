@@ -1,22 +1,152 @@
-name: Build project
+name: Build and Release ESP-Drone Firmware
 
-on: push
-  
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: 'Target board / chip'
+        required: true
+        default: 'esp32'
+        type: choice
+        options:
+          - esp32
+          - esp32s2
+          - esp32s3
+      pin_config:
+        description: |
+          Custom pin configuration (optional). 
+          Provide key=value pairs, one per line. Example:
+          CONFIG_MPU6050_SCL=22
+          CONFIG_MPU6050_SDA=23
+        required: false
+        type: string
+        default: ''
+      release_tag:
+        description: 'Release tag (e.g., v1.0.0). If empty, auto-generated'
+        required: false
+        type: string
+        default: ''
+      create_release:
+        description: 'Create a GitHub Release and upload artifacts'
+        required: true
+        type: boolean
+        default: true
+
+env:
+  IDF_VERSION: v5.0.1          # 根据 README 建议使用 IDF 5.0
+  IDF_GIT_CLONE_URL: https://github.com/espressif/esp-idf.git
+
 jobs:
   build:
-    strategy:
-      matrix:
-        idf_ver: ["release-v4.4", "release-v5.0"] 
-    runs-on: ubuntu-20.04
-    container: espressif/idf:${{ matrix.idf_ver }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write            # 用于创建 Release 和上传附件
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
-      - name: Build project
-        shell: bash
+          submodules: 'recursive'  # 如果仓库有子模块
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache ESP-IDF
+        id: cache-idf
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/esp/esp-idf
+            ~/.espressif
+          key: ${{ runner.os }}-idf-${{ env.IDF_VERSION }}-${{ hashFiles('.gitmodules') }}
+          restore-keys: |
+            ${{ runner.os }}-idf-${{ env.IDF_VERSION }}-
+
+      - name: Install ESP-IDF
+        if: steps.cache-idf.outputs.cache-hit != 'true'
         run: |
-          . ${IDF_PATH}/export.sh
-          pip install idf-component-manager idf-build-apps
-          idf-build-apps find
-          idf-build-apps build
+          mkdir -p ~/esp
+          cd ~/esp
+          git clone --recursive --depth 1 --branch ${{ env.IDF_VERSION }} ${{ env.IDF_GIT_CLONE_URL }}
+          cd esp-idf
+          ./install.sh
+
+      - name: Set up ESP-IDF environment
+        run: |
+          cd ~/esp/esp-idf
+          ./export.sh
+          echo "IDF_PATH=~/esp/esp-idf" >> $GITHUB_ENV
+          echo "$HOME/.espressif/python_env/idf5.0_py3.11_env/bin" >> $GITHUB_PATH
+
+      - name: Configure target chip
+        run: |
+          source ~/esp/esp-idf/export.sh
+          idf.py set-target ${{ inputs.board }}
+        working-directory: ${{ github.workspace }}
+
+      - name: Apply custom pin configuration
+        if: inputs.pin_config != ''
+        run: |
+          # 将用户输入的引脚配置追加到 sdkconfig 文件
+          # 注意：idf.py set-target 已生成默认 sdkconfig，修改后需要重新运行 menuconfig 来生效
+          # 这里直接追加，并强制用新的配置覆盖
+          echo "${{ inputs.pin_config }}" >> sdkconfig
+          # 使用 idf.py reconfigure 让配置生效
+          source ~/esp/esp-idf/export.sh
+          idf.py reconfigure
+        working-directory: ${{ github.workspace }}
+
+      - name: Build firmware
+        run: |
+          source ~/esp/esp-idf/export.sh
+          idf.py build
+        working-directory: ${{ github.workspace }}
+
+      - name: Prepare artifacts
+        id: prepare
+        run: |
+          BUILD_DIR="build"
+          BOARD="${{ inputs.board }}"
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="manual-$(date +'%Y%m%d-%H%M%S')"
+          fi
+          ARTIFACT_NAME="esp-drone-firmware-${BOARD}-${TAG}"
+          mkdir -p artifacts
+          # 收集常见的固件文件
+          cp ${BUILD_DIR}/*.bin artifacts/ 2>/dev/null || true
+          cp ${BUILD_DIR}/bootloader/*.bin artifacts/ 2>/dev/null || true
+          cp ${BUILD_DIR}/partition_table/*.bin artifacts/ 2>/dev/null || true
+          # 如果有合并的固件文件，也一并复制
+          if [ -f "${BUILD_DIR}/esp-drone.bin" ]; then
+            cp ${BUILD_DIR}/esp-drone.bin artifacts/
+          fi
+          # 生成 ZIP 包
+          zip -r ${ARTIFACT_NAME}.zip artifacts/
+          echo "artifact_name=${ARTIFACT_NAME}.zip" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Upload artifacts to workflow run (for debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prepare.outputs.artifact_name }}
+          path: ${{ steps.prepare.outputs.artifact_name }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release and upload assets
+        if: inputs.create_release == true
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.prepare.outputs.tag }}
+          name: "ESP-Drone Firmware ${{ steps.prepare.outputs.tag }}"
+          body: |
+            Automated build for board **${{ inputs.board }}**.
+            Triggered by ${{ github.actor }}.
+            Pin configuration: ${{ inputs.pin_config || 'default' }}
+          files: ${{ steps.prepare.outputs.artifact_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
