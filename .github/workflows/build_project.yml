@@ -33,7 +33,7 @@ on:
         default: true
 
 env:
-  IDF_VERSION: v5.0.4   # 根据 README 建议使用 IDF 5.0 系列
+  IDF_VERSION: v5.0.4
 
 jobs:
   build:
@@ -47,16 +47,23 @@ jobs:
         with:
           submodules: 'recursive'
 
-      # 关键修补步骤：修复 esp-now 组件与 IDF 5.0 的不兼容
+      # 修补 esp-now 组件（强制替换）
       - name: Patch esp-now for IDF 5.0
         run: |
           TARGET_FILE="managed_components/espressif__esp-now/src/utils/src/espnow_mem.c"
-          if [ -f "$TARGET_FILE" ]; then
-            # 将未知类型 configRUN_TIME_COUNTER_TYPE 替换为 uint32_t
-            sed -i 's/configRUN_TIME_COUNTER_TYPE/uint32_t/g' "$TARGET_FILE"
-            echo "✅ Patched $TARGET_FILE"
+          if [ ! -f "$TARGET_FILE" ]; then
+            echo "❌ File not found: $TARGET_FILE"
+            exit 1
+          fi
+          # 将 configRUN_TIME_COUNTER_TYPE 替换为 uint32_t
+          sed -i 's/configRUN_TIME_COUNTER_TYPE/uint32_t/g' "$TARGET_FILE"
+          # 验证修补是否成功
+          if grep -q "uint32_t ulTotalRunTime" "$TARGET_FILE"; then
+            echo "✅ Patch applied successfully"
           else
-            echo "⚠️ $TARGET_FILE not found, skipping patch"
+            echo "⚠️ Patch may have failed, check file content"
+            cat "$TARGET_FILE" | grep -C2 "ulTotalRunTime"
+            exit 1
           fi
 
       - name: Build with ESP-IDF
@@ -66,6 +73,10 @@ jobs:
           target: ${{ inputs.board }}
           path: .
           command: |
+            # 再次确保修补（防止 action 意外覆盖）
+            if [ -f "managed_components/espressif__esp-now/src/utils/src/espnow_mem.c" ]; then
+              sed -i 's/configRUN_TIME_COUNTER_TYPE/uint32_t/g' managed_components/espressif__esp-now/src/utils/src/espnow_mem.c
+            fi
             # 应用自定义引脚配置
             if [ -n "${{ inputs.pin_config }}" ]; then
               echo "${{ inputs.pin_config }}" >> sdkconfig
