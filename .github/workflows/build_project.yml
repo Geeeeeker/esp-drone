@@ -47,7 +47,20 @@ jobs:
         with:
           submodules: 'recursive'
 
-      # 使用官方 action 编译固件
+      # 修补 esp-now 组件与 IDF 5.0 的兼容性问题
+      - name: Patch esp-now component for IDF 5.0
+        run: |
+          ESP_NOW_MEM_C="managed_components/espressif__esp-now/src/utils/src/espnow_mem.c"
+          if [ -f "$ESP_NOW_MEM_C" ]; then
+            # 替换未知类型 configRUN_TIME_COUNTER_TYPE 为 uint32_t
+            sed -i 's/configRUN_TIME_COUNTER_TYPE/uint32_t/g' "$ESP_NOW_MEM_C"
+            # 修正 uxTaskGetSystemState 参数类型（将 &ulTotalRunTime 强制转换）
+            # 更干净的方法：将 ulTotalRunTime 声明为 uint32_t，但上面已经改了类型声明，无需额外操作
+            echo "Patched $ESP_NOW_MEM_C for IDF 5.0 compatibility"
+          else
+            echo "Warning: $ESP_NOW_MEM_C not found, skip patching"
+          fi
+
       - name: Build with ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:
